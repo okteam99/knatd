@@ -1,0 +1,15 @@
+[Unit]
+Description=sinetd kernel port forwarding
+Documentation=https://github.com/okai99/sinetd
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/sinetd --enable-ip-forward apply
+ExecReload=/usr/local/sbin/sinetd --enable-ip-forward apply
+ExecStop=/usr/local/sbin/sinetd clear
+
+[Install]
+WantedBy=multi-user.target

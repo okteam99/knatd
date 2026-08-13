@@ -1,0 +1,635 @@
+#!/usr/bin/env python3
+"""Manage iptables port-forwarding rules from rinetd-style config files.
+
+Supported rule format:
+
+    bind_address bind_port[/tcp|udp] target_address target_port[/tcp|udp] [src=IP]
+
+The tool owns only four dedicated chains and never flushes unrelated rules.
+"""
+
+from __future__ import annotations
+
+import argparse
+import ipaddress
+import os
+import pathlib
+import shlex
+import shutil
+import subprocess
+import sys
+from dataclasses import dataclass
+from typing import Iterable, Sequence
+
+
+OWNER = "sinetd"
+DNAT_CHAIN = "SINETD_DNAT"
+OUTPUT_CHAIN = "SINETD_OUTPUT"
+FORWARD_CHAIN = "SINETD_FWD"
+SNAT_CHAIN = "SINETD_SNAT"
+DEFAULT_CONFIG_DIR = pathlib.Path("/etc/sinetd")
+DEFAULT_CONFIG_PATTERN = "*.conf"
+IGNORED_DIRECTIVES = {"logfile", "logcommon", "pidlogfile"}
+UNSUPPORTED_DIRECTIVES = {"allow", "deny"}
+
+
+class ConfigError(ValueError):
+    pass
+
+
+class CommandError(RuntimeError):
+    def __init__(self, argv: Sequence[str], returncode: int, stderr: str = "") -> None:
+        detail = stderr.strip()
+        message = f"command failed ({returncode}): {shlex.join(argv)}"
+        if detail:
+            message += f"\n{detail}"
+        super().__init__(message)
+        self.argv = list(argv)
+        self.returncode = returncode
+
+
+@dataclass(frozen=True)
+class ForwardRule:
+    source: str
+    line: int
+    bind_address: str
+    bind_port: int
+    target_address: str
+    target_port: int
+    protocol: str
+    source_address: str | None = None
+
+    @property
+    def comment(self) -> str:
+        safe_source = "".join(
+            character if character.isalnum() or character in "_.-" else "_"
+            for character in pathlib.Path(self.source).name
+        )
+        return f"{OWNER}:{safe_source[:32]}:{self.line}"
+
+    @property
+    def location(self) -> str:
+        return f"{self.source}:{self.line}"
+
+    def display(self) -> str:
+        suffix = "" if self.protocol == "tcp" else "/udp"
+        src = f" [src={self.source_address}]" if self.source_address else ""
+        return (
+            f"{self.bind_address} {self.bind_port}{suffix} "
+            f"{self.target_address} {self.target_port}{suffix}{src}"
+        )
+
+
+def ipv4(value: str, *, line: int, field: str, wildcard: bool = False) -> str:
+    try:
+        parsed = ipaddress.ip_address(value)
+    except ValueError as exc:
+        raise ConfigError(
+            f"line {line}: {field} must be a stable IPv4 address, got {value!r}"
+        ) from exc
+    if parsed.version != 4:
+        raise ConfigError(f"line {line}: IPv6 is not supported by this iptables backend")
+    if not wildcard and parsed.is_unspecified:
+        raise ConfigError(f"line {line}: target address cannot be 0.0.0.0")
+    return str(parsed)
+
+
+def port_spec(value: str, *, line: int, inherited_protocol: str | None = None) -> tuple[int, str]:
+    if "/" in value:
+        number, protocol = value.rsplit("/", 1)
+        protocol = protocol.lower()
+    else:
+        number = value
+        protocol = inherited_protocol or "tcp"
+    if protocol not in {"tcp", "udp"}:
+        raise ConfigError(f"line {line}: protocol must be tcp or udp, got {protocol!r}")
+    try:
+        port = int(number, 10)
+    except ValueError as exc:
+        raise ConfigError(f"line {line}: port must be numeric, got {number!r}") from exc
+    if not 1 <= port <= 65535:
+        raise ConfigError(f"line {line}: port {port} is outside 1..65535")
+    return port, protocol
+
+
+def parse_options(tokens: Sequence[str], *, line: int) -> str | None:
+    if not tokens:
+        return None
+    raw = " ".join(tokens).strip()
+    if not (raw.startswith("[") and raw.endswith("]")):
+        raise ConfigError(f"line {line}: options must be enclosed in [...]" )
+    body = raw[1:-1].strip()
+    if not body:
+        return None
+    source_address: str | None = None
+    for item in body.split(","):
+        key, separator, value = item.strip().partition("=")
+        if not separator:
+            raise ConfigError(f"line {line}: invalid option {item!r}")
+        if key == "src":
+            if source_address is not None:
+                raise ConfigError(f"line {line}: src may appear only once")
+            source_address = ipv4(value, line=line, field="src")
+        elif key == "timeout":
+            raise ConfigError(
+                f"line {line}: timeout is a rinetd userspace option and has no per-rule iptables equivalent"
+            )
+        else:
+            raise ConfigError(f"line {line}: unsupported option {key!r}")
+    return source_address
+
+
+def parse_config_text(
+    text: str, *, source: str = "<memory>"
+) -> tuple[list[ForwardRule], list[str]]:
+    rules: list[ForwardRule] = []
+    warnings: list[str] = []
+    identities: set[tuple[str, int, str]] = set()
+
+    for line_number, raw_line in enumerate(text.splitlines(), start=1):
+        try:
+            tokens = shlex.split(raw_line, comments=True, posix=True)
+        except ValueError as exc:
+            raise ConfigError(f"line {line_number}: {exc}") from exc
+        if not tokens:
+            continue
+
+        directive = tokens[0].lower()
+        if directive in IGNORED_DIRECTIVES:
+            warnings.append(f"line {line_number}: ignored rinetd directive {directive}")
+            continue
+        if directive in UNSUPPORTED_DIRECTIVES:
+            raise ConfigError(
+                f"line {line_number}: {directive} ACLs are not supported; use firewall source rules instead"
+            )
+        if len(tokens) < 4:
+            raise ConfigError(f"line {line_number}: expected at least 4 columns")
+
+        bind_address = ipv4(tokens[0], line=line_number, field="bind address", wildcard=True)
+        bind_port, bind_protocol = port_spec(tokens[1], line=line_number)
+        target_address = ipv4(tokens[2], line=line_number, field="target address")
+        target_port, target_protocol = port_spec(
+            tokens[3], line=line_number, inherited_protocol=bind_protocol
+        )
+        if bind_protocol != target_protocol:
+            raise ConfigError(
+                f"line {line_number}: iptables cannot translate {bind_protocol} traffic to {target_protocol}"
+            )
+        source_address = parse_options(tokens[4:], line=line_number)
+
+        identity = (bind_address, bind_port, bind_protocol)
+        if identity in identities:
+            raise ConfigError(
+                f"line {line_number}: duplicate listener {bind_address}:{bind_port}/{bind_protocol}"
+            )
+        identities.add(identity)
+        rules.append(
+            ForwardRule(
+                source=source,
+                line=line_number,
+                bind_address=bind_address,
+                bind_port=bind_port,
+                target_address=target_address,
+                target_port=target_port,
+                protocol=bind_protocol,
+                source_address=source_address,
+            )
+        )
+
+    return rules, warnings
+
+
+def discover_config_paths(configs: Sequence[pathlib.Path] | None) -> list[pathlib.Path]:
+    paths: list[pathlib.Path] = []
+    candidates = list(configs) if configs else [DEFAULT_CONFIG_DIR]
+    for candidate in candidates:
+        if candidate.is_dir():
+            paths.extend(sorted(candidate.glob(DEFAULT_CONFIG_PATTERN)))
+        elif candidate.is_file():
+            paths.append(candidate)
+        else:
+            raise ConfigError(f"configuration path does not exist: {candidate}")
+    unique = list(dict.fromkeys(path.resolve() for path in paths))
+    if not unique:
+        source = ", ".join(str(path) for path in candidates)
+        raise ConfigError(f"no {DEFAULT_CONFIG_PATTERN} configuration files found under: {source}")
+    return unique
+
+
+def parse_configs(paths: Sequence[pathlib.Path]) -> tuple[list[ForwardRule], list[str]]:
+    all_rules: list[ForwardRule] = []
+    all_warnings: list[str] = []
+    listeners: dict[tuple[int, str], list[ForwardRule]] = {}
+    for path in paths:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ConfigError(f"cannot read {path}: {exc}") from exc
+        rules, warnings = parse_config_text(text, source=str(path))
+        all_warnings.extend(f"{path}: {warning}" for warning in warnings)
+        for rule in rules:
+            socket_key = (rule.bind_port, rule.protocol)
+            for previous in listeners.get(socket_key, []):
+                addresses_overlap = (
+                    rule.bind_address == previous.bind_address
+                    or rule.bind_address == "0.0.0.0"
+                    or previous.bind_address == "0.0.0.0"
+                )
+                if addresses_overlap:
+                    raise ConfigError(
+                        f"{rule.location}: listener overlaps one defined at {previous.location}: "
+                        f"{rule.bind_address}:{rule.bind_port}/{rule.protocol}"
+                    )
+            listeners.setdefault(socket_key, []).append(rule)
+            all_rules.append(rule)
+    return all_rules, all_warnings
+
+
+def rule_match(rule: ForwardRule, *, original: bool) -> list[str]:
+    match = ["-p", rule.protocol]
+    if rule.bind_address == "0.0.0.0":
+        if not original:
+            match += ["-m", "addrtype", "--dst-type", "LOCAL"]
+    else:
+        if original:
+            match += ["--ctorigdst", rule.bind_address]
+        else:
+            match += ["-d", rule.bind_address]
+    if original:
+        match += ["--ctorigdstport", str(rule.bind_port)]
+    else:
+        match += ["--dport", str(rule.bind_port)]
+    return match
+
+
+def owned_rule_commands(
+    rules: Iterable[ForwardRule], *, masquerade: bool, local_output: bool
+) -> list[tuple[str, list[str]]]:
+    commands: list[tuple[str, list[str]]] = []
+    for rule in rules:
+        destination = f"{rule.target_address}:{rule.target_port}"
+        comment = ["-m", "comment", "--comment", rule.comment]
+        dnat = rule_match(rule, original=False) + comment + [
+            "-j", "DNAT", "--to-destination", destination
+        ]
+        commands.append(("nat", ["-A", DNAT_CHAIN] + dnat))
+        if local_output:
+            commands.append(("nat", ["-A", OUTPUT_CHAIN] + dnat))
+
+        conntrack = ["-m", "conntrack"]
+        if rule.bind_address != "0.0.0.0":
+            conntrack += ["--ctorigdst", rule.bind_address]
+        conntrack += ["--ctorigdstport", str(rule.bind_port)]
+
+        commands.append(
+            (
+                "filter",
+                [
+                    "-A", FORWARD_CHAIN,
+                    "-p", rule.protocol,
+                    "-d", rule.target_address,
+                    "--dport", str(rule.target_port),
+                ]
+                + conntrack
+                + ["--ctdir", "ORIGINAL", "--ctstate", "NEW,ESTABLISHED,RELATED"]
+                + comment
+                + ["-j", "ACCEPT"],
+            )
+        )
+        commands.append(
+            (
+                "filter",
+                [
+                    "-A", FORWARD_CHAIN,
+                    "-p", rule.protocol,
+                    "-s", rule.target_address,
+                    "--sport", str(rule.target_port),
+                ]
+                + conntrack
+                + ["--ctdir", "REPLY", "--ctstate", "ESTABLISHED,RELATED"]
+                + comment
+                + ["-j", "ACCEPT"],
+            )
+        )
+
+        if rule.source_address:
+            snat_target = ["-j", "SNAT", "--to-source", rule.source_address]
+        elif masquerade:
+            snat_target = ["-j", "MASQUERADE"]
+        else:
+            snat_target = []
+        if snat_target:
+            commands.append(
+                (
+                    "nat",
+                    [
+                        "-A", SNAT_CHAIN,
+                        "-p", rule.protocol,
+                        "-d", rule.target_address,
+                        "--dport", str(rule.target_port),
+                    ]
+                    + conntrack
+                    + ["--ctdir", "ORIGINAL"]
+                    + comment
+                    + snat_target,
+                )
+            )
+    return commands
+
+
+class Iptables:
+    def __init__(self, wait_seconds: int = 5) -> None:
+        self.iptables = shutil.which("iptables") or "iptables"
+        self.iptables_save = shutil.which("iptables-save") or "iptables-save"
+        self.iptables_restore = shutil.which("iptables-restore") or "iptables-restore"
+        self.wait_seconds = wait_seconds
+
+    def command(self, table: str, args: Sequence[str]) -> list[str]:
+        return [self.iptables, "-w", str(self.wait_seconds), "-t", table, *args]
+
+    @staticmethod
+    def run(
+        argv: Sequence[str], *, check: bool = True, input_text: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        completed = subprocess.run(
+            list(argv),
+            input=input_text,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if check and completed.returncode != 0:
+            raise CommandError(argv, completed.returncode, completed.stderr)
+        return completed
+
+    def exec(self, table: str, args: Sequence[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
+        return self.run(self.command(table, args), check=check)
+
+    def snapshot(self) -> str:
+        return self.run([self.iptables_save]).stdout
+
+    def restore(self, snapshot: str) -> None:
+        self.run([self.iptables_restore, "-w", str(self.wait_seconds)], input_text=snapshot)
+
+    def chain_exists(self, table: str, chain: str) -> bool:
+        return self.exec(table, ["-S", chain], check=False).returncode == 0
+
+    def ensure_chain(self, table: str, chain: str) -> None:
+        if not self.chain_exists(table, chain):
+            self.exec(table, ["-N", chain])
+
+    def ensure_jump(self, table: str, builtin: str, target: str) -> None:
+        spec = ["-m", "comment", "--comment", OWNER, "-j", target]
+        if self.exec(table, ["-C", builtin, *spec], check=False).returncode != 0:
+            self.exec(table, ["-I", builtin, "1", *spec])
+
+    def remove_jump(self, table: str, builtin: str, target: str) -> None:
+        spec = ["-m", "comment", "--comment", OWNER, "-j", target]
+        while self.exec(table, ["-C", builtin, *spec], check=False).returncode == 0:
+            self.exec(table, ["-D", builtin, *spec])
+
+
+def require_programs(backend: Iptables) -> None:
+    missing = [
+        name
+        for name, value in (
+            ("iptables", backend.iptables),
+            ("iptables-save", backend.iptables_save),
+            ("iptables-restore", backend.iptables_restore),
+        )
+        if shutil.which(value) is None
+    ]
+    if missing:
+        raise RuntimeError(f"required program(s) not found: {', '.join(missing)}")
+
+
+def require_root() -> None:
+    if os.geteuid() != 0:
+        raise RuntimeError("this command must run as root")
+
+
+def read_ip_forward() -> str:
+    path = pathlib.Path("/proc/sys/net/ipv4/ip_forward")
+    try:
+        return path.read_text(encoding="ascii").strip()
+    except OSError as exc:
+        raise RuntimeError(f"cannot read {path}: {exc}") from exc
+
+
+def enable_ip_forward(allow_change: bool) -> str:
+    previous = read_ip_forward()
+    if previous == "1":
+        return previous
+    if not allow_change:
+        raise RuntimeError(
+            "net.ipv4.ip_forward is disabled; enable it persistently or re-run with --enable-ip-forward"
+        )
+    try:
+        pathlib.Path("/proc/sys/net/ipv4/ip_forward").write_text("1\n", encoding="ascii")
+    except OSError as exc:
+        raise RuntimeError(f"cannot enable net.ipv4.ip_forward: {exc}") from exc
+    return previous
+
+
+def setup_owned_chains(backend: Iptables, *, local_output: bool) -> None:
+    backend.ensure_chain("nat", DNAT_CHAIN)
+    backend.ensure_chain("nat", OUTPUT_CHAIN)
+    backend.ensure_chain("filter", FORWARD_CHAIN)
+    backend.ensure_chain("nat", SNAT_CHAIN)
+    backend.ensure_jump("nat", "PREROUTING", DNAT_CHAIN)
+    backend.ensure_jump("filter", "FORWARD", FORWARD_CHAIN)
+    backend.ensure_jump("nat", "POSTROUTING", SNAT_CHAIN)
+    if local_output:
+        backend.ensure_jump("nat", "OUTPUT", OUTPUT_CHAIN)
+    else:
+        backend.remove_jump("nat", "OUTPUT", OUTPUT_CHAIN)
+
+
+def flush_owned_chains(backend: Iptables) -> None:
+    backend.exec("nat", ["-F", DNAT_CHAIN])
+    backend.exec("nat", ["-F", OUTPUT_CHAIN])
+    backend.exec("filter", ["-F", FORWARD_CHAIN])
+    backend.exec("nat", ["-F", SNAT_CHAIN])
+
+
+def apply_rules(
+    backend: Iptables,
+    rules: Sequence[ForwardRule],
+    *,
+    masquerade: bool,
+    local_output: bool,
+    allow_ip_forward_change: bool,
+) -> None:
+    require_root()
+    require_programs(backend)
+    snapshot = backend.snapshot()
+    previous_ip_forward: str | None = None
+    try:
+        if rules:
+            previous_ip_forward = enable_ip_forward(allow_ip_forward_change)
+        setup_owned_chains(backend, local_output=local_output)
+        flush_owned_chains(backend)
+        for table, args in owned_rule_commands(
+            rules, masquerade=masquerade, local_output=local_output
+        ):
+            backend.exec(table, args)
+    except Exception:
+        try:
+            backend.restore(snapshot)
+            if previous_ip_forward == "0":
+                pathlib.Path("/proc/sys/net/ipv4/ip_forward").write_text("0\n", encoding="ascii")
+        except Exception as rollback_error:
+            print(f"warning: rollback also failed: {rollback_error}", file=sys.stderr)
+        raise
+
+
+def clear_rules(backend: Iptables) -> None:
+    require_root()
+    require_programs(backend)
+    snapshot = backend.snapshot()
+    try:
+        for table, builtin, chain in (
+            ("nat", "PREROUTING", DNAT_CHAIN),
+            ("nat", "OUTPUT", OUTPUT_CHAIN),
+            ("filter", "FORWARD", FORWARD_CHAIN),
+            ("nat", "POSTROUTING", SNAT_CHAIN),
+        ):
+            backend.remove_jump(table, builtin, chain)
+        for table, chain in (
+            ("nat", OUTPUT_CHAIN),
+            ("nat", DNAT_CHAIN),
+            ("filter", FORWARD_CHAIN),
+            ("nat", SNAT_CHAIN),
+        ):
+            if backend.chain_exists(table, chain):
+                backend.exec(table, ["-F", chain])
+                backend.exec(table, ["-X", chain])
+    except Exception:
+        try:
+            backend.restore(snapshot)
+        except Exception as rollback_error:
+            print(f"warning: rollback also failed: {rollback_error}", file=sys.stderr)
+        raise
+
+
+def print_render(
+    backend: Iptables,
+    rules: Sequence[ForwardRule],
+    *,
+    masquerade: bool,
+    local_output: bool,
+) -> None:
+    print("# Generated rules for the dedicated chains (inspection only)")
+    for table, args in owned_rule_commands(
+        rules, masquerade=masquerade, local_output=local_output
+    ):
+        print(shlex.join(backend.command(table, args)))
+
+
+def print_status(backend: Iptables) -> int:
+    require_root()
+    require_programs(backend)
+    found = False
+    for table, chain in (
+        ("nat", DNAT_CHAIN),
+        ("nat", OUTPUT_CHAIN),
+        ("filter", FORWARD_CHAIN),
+        ("nat", SNAT_CHAIN),
+    ):
+        completed = backend.exec(table, ["-S", chain], check=False)
+        if completed.returncode == 0:
+            found = True
+            print(completed.stdout.rstrip())
+    if not found:
+        print("no managed rules are installed")
+        return 1
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="sinetd",
+        description="Apply rinetd-style port mappings as kernel iptables rules.",
+    )
+    parser.add_argument(
+        "-c",
+        "--config",
+        type=pathlib.Path,
+        action="append",
+        metavar="FILE_OR_DIR",
+        help="config file or directory; repeatable (default: /etc/sinetd/*.conf)",
+    )
+    parser.add_argument(
+        "--no-masquerade",
+        action="store_true",
+        help="preserve client source addresses; the target must route replies through this host",
+    )
+    parser.add_argument(
+        "--local-output",
+        action="store_true",
+        help="also redirect connections created locally on the forwarding host",
+    )
+    parser.add_argument(
+        "--enable-ip-forward",
+        action="store_true",
+        help="enable IPv4 forwarding at runtime if currently disabled",
+    )
+    parser.add_argument("--wait", type=int, default=5, help="seconds to wait for the xtables lock")
+    parser.add_argument("command", choices=("check", "render", "apply", "status", "clear"))
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    if args.wait < 0:
+        print("error: --wait must not be negative", file=sys.stderr)
+        return 2
+    backend = Iptables(wait_seconds=args.wait)
+    try:
+        if args.command == "status":
+            return print_status(backend)
+        if args.command == "clear":
+            clear_rules(backend)
+            print("managed rules removed")
+            return 0
+
+        config_paths = discover_config_paths(args.config)
+        rules, warnings = parse_configs(config_paths)
+        for warning in warnings:
+            print(f"warning: {warning}", file=sys.stderr)
+
+        if args.command == "check":
+            print(
+                f"OK: {len(config_paths)} configuration file(s), "
+                f"{len(rules)} forwarding rule(s)"
+            )
+            for rule in rules:
+                print(f"  {rule.location}: {rule.display()}")
+            return 0
+        if args.command == "render":
+            print_render(
+                backend,
+                rules,
+                masquerade=not args.no_masquerade,
+                local_output=args.local_output,
+            )
+            return 0
+        if args.command == "apply":
+            apply_rules(
+                backend,
+                rules,
+                masquerade=not args.no_masquerade,
+                local_output=args.local_output,
+                allow_ip_forward_change=args.enable_ip_forward,
+            )
+            print(f"applied {len(rules)} forwarding rule(s)")
+            return 0
+        raise AssertionError(args.command)
+    except (ConfigError, CommandError, RuntimeError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

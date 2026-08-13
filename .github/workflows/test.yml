@@ -1,0 +1,22 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check syntax
+        run: |
+          python3 -m py_compile sinetd tests/test_sinetd.py
+          sh -n install.sh
+      - name: Run tests
+        run: python3 -m unittest -v tests/test_sinetd.py
+      - name: Check reference configuration
+        run: ./sinetd -c examples check
