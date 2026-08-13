@@ -6,7 +6,7 @@ iptables DNAT 规则。数据包始终由内核转发，不经过常驻用户态
 ## 一行安装
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/okai99/knatd/main/install.sh | sudo sh
+curl -fsSL https://raw.githubusercontent.com/okteam99/knatd/main/install.sh | sudo sh
 ```
 
 安装程序会：

@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-REPOSITORY="okai99/knatd"
+REPOSITORY="okteam99/knatd"
 BRANCH="${KNATD_BRANCH:-main}"
 BASE_URL="${KNATD_BASE_URL:-https://raw.githubusercontent.com/${REPOSITORY}/${BRANCH}}"
 CONFIG_DIR="/etc/knatd"
