@@ -1,12 +1,12 @@
 #!/bin/sh
 set -eu
 
-REPOSITORY="okai99/sinetd"
-BRANCH="${SINETD_BRANCH:-main}"
-BASE_URL="${SINETD_BASE_URL:-https://raw.githubusercontent.com/${REPOSITORY}/${BRANCH}}"
-CONFIG_DIR="/etc/sinetd"
-PROGRAM_PATH="/usr/local/sbin/sinetd"
-SERVICE_PATH="/etc/systemd/system/sinetd.service"
+REPOSITORY="okai99/knatd"
+BRANCH="${KNATD_BRANCH:-main}"
+BASE_URL="${KNATD_BASE_URL:-https://raw.githubusercontent.com/${REPOSITORY}/${BRANCH}}"
+CONFIG_DIR="/etc/knatd"
+PROGRAM_PATH="/usr/local/sbin/knatd"
+SERVICE_PATH="/etc/systemd/system/knatd.service"
 DEFAULT_CONFIG_PATH="${CONFIG_DIR}/default.conf"
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -44,17 +44,17 @@ download() {
     fi
 }
 
-download "${BASE_URL}/sinetd" "${TEMP_DIR}/sinetd"
-download "${BASE_URL}/sinetd.service" "${TEMP_DIR}/sinetd.service"
-download "${BASE_URL}/examples/sinetd.conf" "${TEMP_DIR}/sinetd.conf"
+download "${BASE_URL}/knatd" "${TEMP_DIR}/knatd"
+download "${BASE_URL}/knatd.service" "${TEMP_DIR}/knatd.service"
+download "${BASE_URL}/examples/knatd.conf" "${TEMP_DIR}/knatd.conf"
 
-python3 -m py_compile "${TEMP_DIR}/sinetd"
+python3 -m py_compile "${TEMP_DIR}/knatd"
 install -d -m 0755 /usr/local/sbin "${CONFIG_DIR}" /etc/systemd/system
-install -m 0755 "${TEMP_DIR}/sinetd" "${PROGRAM_PATH}"
-install -m 0644 "${TEMP_DIR}/sinetd.service" "${SERVICE_PATH}"
+install -m 0755 "${TEMP_DIR}/knatd" "${PROGRAM_PATH}"
+install -m 0644 "${TEMP_DIR}/knatd.service" "${SERVICE_PATH}"
 
 if ! find "${CONFIG_DIR}" -maxdepth 1 -type f -name '*.conf' -print -quit | grep -q .; then
-    install -m 0644 "${TEMP_DIR}/sinetd.conf" "${DEFAULT_CONFIG_PATH}"
+    install -m 0644 "${TEMP_DIR}/knatd.conf" "${DEFAULT_CONFIG_PATH}"
     echo "created default reference configuration: ${DEFAULT_CONFIG_PATH}"
 else
     echo "kept existing configuration under ${CONFIG_DIR}"
@@ -62,7 +62,7 @@ fi
 
 "${PROGRAM_PATH}" check
 systemctl daemon-reload
-systemctl enable --now sinetd.service
+systemctl enable --now knatd.service
 
-echo "sinetd installed and started"
-echo "edit ${CONFIG_DIR}/*.conf, then run: systemctl reload sinetd"
+echo "knatd installed and started"
+echo "edit ${CONFIG_DIR}/*.conf, then run: systemctl reload knatd"

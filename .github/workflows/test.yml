@@ -14,9 +14,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Check syntax
         run: |
-          python3 -m py_compile sinetd tests/test_sinetd.py
+          python3 -m py_compile knatd tests/test_knatd.py
           sh -n install.sh
       - name: Run tests
-        run: python3 -m unittest -v tests/test_sinetd.py
+        run: python3 -m unittest -v tests/test_knatd.py
       - name: Check reference configuration
-        run: ./sinetd -c examples check
+        run: ./knatd -c examples check

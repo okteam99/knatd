@@ -6,9 +6,9 @@ import unittest
 from unittest import mock
 
 
-SCRIPT = pathlib.Path(__file__).parents[1] / "sinetd"
-LOADER = importlib.machinery.SourceFileLoader("sinetd", str(SCRIPT))
-SPEC = importlib.util.spec_from_loader("sinetd", LOADER)
+SCRIPT = pathlib.Path(__file__).parents[1] / "knatd"
+LOADER = importlib.machinery.SourceFileLoader("knatd", str(SCRIPT))
+SPEC = importlib.util.spec_from_loader("knatd", LOADER)
 MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 import sys
@@ -54,14 +54,14 @@ class ConfigTests(unittest.TestCase):
         rules, _ = MODULE.parse_config_text("0.0.0.0 8080 10.0.0.2 80")
         commands = MODULE.owned_rule_commands(rules, masquerade=True, local_output=False)
         joined = [" ".join(command) for _, command in commands]
-        self.assertTrue(all("SINETD_" in command for command in joined))
+        self.assertTrue(all("KNATD_" in command for command in joined))
         self.assertTrue(any("DNAT --to-destination 10.0.0.2:80" in command for command in joined))
         self.assertTrue(any("MASQUERADE" in command for command in joined))
 
     def test_no_masquerade_omits_snat_rule(self):
         rules, _ = MODULE.parse_config_text("0.0.0.0 8080 10.0.0.2 80")
         commands = MODULE.owned_rule_commands(rules, masquerade=False, local_output=False)
-        self.assertFalse(any(chain == "nat" and "SINETD_SNAT" in args for chain, args in commands))
+        self.assertFalse(any(chain == "nat" and "KNATD_SNAT" in args for chain, args in commands))
 
     def test_src_generates_fixed_snat(self):
         rules, _ = MODULE.parse_config_text(

@@ -22,12 +22,12 @@ from dataclasses import dataclass
 from typing import Iterable, Sequence
 
 
-OWNER = "sinetd"
-DNAT_CHAIN = "SINETD_DNAT"
-OUTPUT_CHAIN = "SINETD_OUTPUT"
-FORWARD_CHAIN = "SINETD_FWD"
-SNAT_CHAIN = "SINETD_SNAT"
-DEFAULT_CONFIG_DIR = pathlib.Path("/etc/sinetd")
+OWNER = "knatd"
+DNAT_CHAIN = "KNATD_DNAT"
+OUTPUT_CHAIN = "KNATD_OUTPUT"
+FORWARD_CHAIN = "KNATD_FWD"
+SNAT_CHAIN = "KNATD_SNAT"
+DEFAULT_CONFIG_DIR = pathlib.Path("/etc/knatd")
 DEFAULT_CONFIG_PATTERN = "*.conf"
 IGNORED_DIRECTIVES = {"logfile", "logcommon", "pidlogfile"}
 UNSUPPORTED_DIRECTIVES = {"allow", "deny"}
@@ -549,7 +549,7 @@ def print_status(backend: Iptables) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="sinetd",
+        prog="knatd",
         description="Apply rinetd-style port mappings as kernel iptables rules.",
     )
     parser.add_argument(
@@ -558,7 +558,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=pathlib.Path,
         action="append",
         metavar="FILE_OR_DIR",
-        help="config file or directory; repeatable (default: /etc/sinetd/*.conf)",
+        help="config file or directory; repeatable (default: /etc/knatd/*.conf)",
     )
     parser.add_argument(
         "--no-masquerade",

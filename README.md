@@ -1,25 +1,25 @@
-# sinetd
+# knatd
 
-`sinetd` 使用熟悉的 rinetd 四列配置格式，将端口映射转换为 Linux
+`knatd`（Kernel NAT Daemon）使用熟悉的 rinetd 四列配置格式，将端口映射转换为 Linux
 iptables DNAT 规则。数据包始终由内核转发，不经过常驻用户态代理进程。
 
 ## 一行安装
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/okai99/sinetd/main/install.sh | sudo sh
+curl -fsSL https://raw.githubusercontent.com/okai99/knatd/main/install.sh | sudo sh
 ```
 
 安装程序会：
 
-- 安装命令到 `/usr/local/sbin/sinetd`
-- 安装并启动 `sinetd.service`
-- 默认加载 `/etc/sinetd/*.conf`
-- 没有现有配置时生成 `/etc/sinetd/default.conf`
+- 安装命令到 `/usr/local/sbin/knatd`
+- 安装并启动 `knatd.service`
+- 默认加载 `/etc/knatd/*.conf`
+- 没有现有配置时生成 `/etc/knatd/default.conf`
 - 参考配置中的规则全部处于注释状态，安装本身不会开放端口
 
 ## 配置
 
-在 `/etc/sinetd/` 中创建任意一个或多个 `.conf` 文件：
+在 `/etc/knatd/` 中创建任意一个或多个 `.conf` 文件：
 
 ```text
 # TCP：本机 8080 转发到 10.0.0.2:80
@@ -43,31 +43,31 @@ TCP 是默认协议。目标端口没有注明协议时，会继承监听端口�
 修改配置后检查并重载：
 
 ```bash
-sudo sinetd check
-sudo sinetd render
-sudo systemctl reload sinetd
+sudo knatd check
+sudo knatd render
+sudo systemctl reload knatd
 ```
 
 查看运行中的规则：
 
 ```bash
-sudo sinetd status
+sudo knatd status
 ```
 
 ## 命令
 
 ```text
-sinetd check    检查全部配置
-sinetd render   预览将生成的 iptables 规则，不修改系统
-sinetd apply    应用全部配置
-sinetd status   查看 sinetd 管理的规则
-sinetd clear    删除 sinetd 管理的规则
+knatd check    检查全部配置
+knatd render   预览将生成的 iptables 规则，不修改系统
+knatd apply    应用全部配置
+knatd status   查看 knatd 管理的规则
+knatd clear    删除 knatd 管理的规则
 ```
 
 `-c FILE_OR_DIR` 可以改用其他文件或目录，也可以重复传入：
 
 ```bash
-sudo sinetd -c /path/a.conf -c /path/conf.d apply
+sudo knatd -c /path/a.conf -c /path/conf.d apply
 ```
 
 ## 源地址与回程路由
@@ -78,10 +78,10 @@ sudo sinetd -c /path/a.conf -c /path/conf.d apply
 如果目标服务器的回程流量确定会经过转发机，可以保留客户端真实 IP：
 
 ```bash
-sudo sinetd --no-masquerade apply
+sudo knatd --no-masquerade apply
 ```
 
-使用 systemd 时，需要同步修改 `sinetd.service` 的 `ExecStart` 和 `ExecReload`。
+使用 systemd 时，需要同步修改 `knatd.service` 的 `ExecStart` 和 `ExecReload`。
 
 ## 与 rinetd 配置的差异
 
@@ -91,7 +91,7 @@ sudo sinetd --no-masquerade apply
 - 四列地址/端口映射
 - `/tcp`、`/udp`
 - `[src=IP]`
-- 多个 `/etc/sinetd/*.conf` 文件
+- 多个 `/etc/knatd/*.conf` 文件
 
 `logfile`、`logcommon`、`pidlogfile` 会被忽略。以下功能会明确报错，因为它们
 无法在保持相同语义的情况下直接转换为 iptables：
@@ -106,10 +106,10 @@ sudo sinetd --no-masquerade apply
 工具只维护以下专用链：
 
 ```text
-SINETD_DNAT
-SINETD_OUTPUT
-SINETD_FWD
-SINETD_SNAT
+KNATD_DNAT
+KNATD_OUTPUT
+KNATD_FWD
+KNATD_SNAT
 ```
 
 它不会清空内置链或其他程序的链。每次修改前都会保存完整 IPv4 规则集，操作
