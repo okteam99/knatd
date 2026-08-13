@@ -7,7 +7,7 @@ BASE_URL="${SINETD_BASE_URL:-https://raw.githubusercontent.com/${REPOSITORY}/${B
 CONFIG_DIR="/etc/sinetd"
 PROGRAM_PATH="/usr/local/sbin/sinetd"
 SERVICE_PATH="/etc/systemd/system/sinetd.service"
-REFERENCE_PATH="${CONFIG_DIR}/00-reference.conf"
+DEFAULT_CONFIG_PATH="${CONFIG_DIR}/default.conf"
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "error: run this installer as root" >&2
@@ -54,8 +54,8 @@ install -m 0755 "${TEMP_DIR}/sinetd" "${PROGRAM_PATH}"
 install -m 0644 "${TEMP_DIR}/sinetd.service" "${SERVICE_PATH}"
 
 if ! find "${CONFIG_DIR}" -maxdepth 1 -type f -name '*.conf' -print -quit | grep -q .; then
-    install -m 0644 "${TEMP_DIR}/sinetd.conf" "${REFERENCE_PATH}"
-    echo "created reference configuration: ${REFERENCE_PATH}"
+    install -m 0644 "${TEMP_DIR}/sinetd.conf" "${DEFAULT_CONFIG_PATH}"
+    echo "created default reference configuration: ${DEFAULT_CONFIG_PATH}"
 else
     echo "kept existing configuration under ${CONFIG_DIR}"
 fi

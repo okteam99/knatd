@@ -14,7 +14,7 @@ curl -fsSL https://raw.githubusercontent.com/okai99/sinetd/main/install.sh | sud
 - 安装命令到 `/usr/local/sbin/sinetd`
 - 安装并启动 `sinetd.service`
 - 默认加载 `/etc/sinetd/*.conf`
-- 没有现有配置时生成 `/etc/sinetd/00-reference.conf`
+- 没有现有配置时生成 `/etc/sinetd/default.conf`
 - 参考配置中的规则全部处于注释状态，安装本身不会开放端口
 
 ## 配置
