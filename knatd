@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Manage iptables port-forwarding rules from rinetd-style config files.
+"""Manage iptables port-forwarding rules from simple four-column config files.
 
 Supported rule format:
 
@@ -132,7 +132,7 @@ def parse_options(tokens: Sequence[str], *, line: int) -> str | None:
             source_address = ipv4(value, line=line, field="src")
         elif key == "timeout":
             raise ConfigError(
-                f"line {line}: timeout is a rinetd userspace option and has no per-rule iptables equivalent"
+                f"line {line}: timeout has no per-rule iptables equivalent"
             )
         else:
             raise ConfigError(f"line {line}: unsupported option {key!r}")
@@ -156,7 +156,7 @@ def parse_config_text(
 
         directive = tokens[0].lower()
         if directive in IGNORED_DIRECTIVES:
-            warnings.append(f"line {line_number}: ignored rinetd directive {directive}")
+            warnings.append(f"line {line_number}: ignored compatibility directive {directive}")
             continue
         if directive in UNSUPPORTED_DIRECTIVES:
             raise ConfigError(
@@ -550,7 +550,7 @@ def print_status(backend: Iptables) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="knatd",
-        description="Apply rinetd-style port mappings as kernel iptables rules.",
+        description="Apply simple port mappings as kernel iptables rules.",
     )
     parser.add_argument(
         "-c",

@@ -1,9 +1,11 @@
 # knatd
 
-`knatd`（Kernel NAT Daemon）使用熟悉的 rinetd 四列配置格式，将端口映射转换为 Linux
+`knatd`（Kernel NAT Daemon）使用简洁的四列配置格式，将端口映射转换为 Linux
 iptables DNAT 规则。数据包始终由内核转发，不经过常驻用户态代理进程。
 
-## 一行安装
+## 使用流程
+
+### 1. 安装
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/okteam99/knatd/main/install.sh | sudo sh
@@ -17,9 +19,15 @@ curl -fsSL https://raw.githubusercontent.com/okteam99/knatd/main/install.sh | su
 - 没有现有配置时生成 `/etc/knatd/default.conf`
 - 参考配置中的规则全部处于注释状态，安装本身不会开放端口
 
-## 配置
+### 2. 添加转发配置
 
-在 `/etc/knatd/` 中创建任意一个或多个 `.conf` 文件：
+直接编辑默认配置：
+
+```bash
+sudoedit /etc/knatd/default.conf
+```
+
+每行表示一条转发规则：
 
 ```text
 # TCP：本机 8080 转发到 10.0.0.2:80
@@ -40,19 +48,47 @@ curl -fsSL https://raw.githubusercontent.com/okteam99/knatd/main/install.sh | su
 
 TCP 是默认协议。目标端口没有注明协议时，会继承监听端口的协议。
 
-修改配置后检查并重载：
+也可以按用途拆分成多个配置文件，例如 `/etc/knatd/web.conf` 和
+`/etc/knatd/dns.conf`。程序会加载该目录下的全部 `.conf` 文件。
+
+### 3. 检查并使配置生效
+
+先检查配置；需要时可以预览将生成的规则：
 
 ```bash
 sudo knatd check
 sudo knatd render
-sudo systemctl reload knatd
 ```
 
-查看运行中的规则：
+`render` 不修改系统。确认无误后重载服务，再查看实际规则：
 
 ```bash
+sudo systemctl reload knatd
 sudo knatd status
 ```
+
+### 4. 修改配置
+
+编辑对应的 `.conf` 文件，完成后再次检查并重载：
+
+```bash
+sudoedit /etc/knatd/default.conf
+sudo knatd check && sudo systemctl reload knatd
+```
+
+### 5. 删除配置
+
+删除单条转发时，从对应文件中删除该行或在行首添加 `#`，然后重载。
+
+删除整个独立配置文件时：
+
+```bash
+sudo rm /etc/knatd/web.conf
+sudo knatd check && sudo systemctl reload knatd
+```
+
+建议保留 `/etc/knatd/default.conf`，即使其中只有注释。需要移除全部转发时，
+清空或注释 `default.conf` 中的所有规则、删除其他 `.conf` 文件，然后重载服务。
 
 ## 命令
 
@@ -72,8 +108,8 @@ sudo knatd -c /path/a.conf -c /path/conf.d apply
 
 ## 源地址与回程路由
 
-默认启用 MASQUERADE，以接近 rinetd 的行为。目标服务器看到的客户端地址是
-转发机地址，好处是不要求目标服务器配置特殊的回程路由。
+默认启用 MASQUERADE。目标服务器看到的客户端地址是转发机地址，好处是不要求
+目标服务器配置特殊的回程路由。
 
 如果目标服务器的回程流量确定会经过转发机，可以保留客户端真实 IP：
 
@@ -82,24 +118,6 @@ sudo knatd --no-masquerade apply
 ```
 
 使用 systemd 时，需要同步修改 `knatd.service` 的 `ExecStart` 和 `ExecReload`。
-
-## 与 rinetd 配置的差异
-
-支持：
-
-- IPv4 TCP 与 UDP
-- 四列地址/端口映射
-- `/tcp`、`/udp`
-- `[src=IP]`
-- 多个 `/etc/knatd/*.conf` 文件
-
-`logfile`、`logcommon`、`pidlogfile` 会被忽略。以下功能会明确报错，因为它们
-无法在保持相同语义的情况下直接转换为 iptables：
-
-- `allow`、`deny`
-- UDP `timeout`
-- TCP 与 UDP 互转
-- 域名、服务名、IPv6 和端口范围
 
 ## 安全与共存
 
