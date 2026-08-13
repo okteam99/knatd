@@ -29,6 +29,9 @@ FORWARD_CHAIN = "KNATD_FWD"
 SNAT_CHAIN = "KNATD_SNAT"
 DEFAULT_CONFIG_DIR = pathlib.Path("/etc/knatd")
 DEFAULT_CONFIG_PATTERN = "*.conf"
+INSTALLED_PROGRAM_PATH = pathlib.Path("/usr/local/sbin/knatd")
+SYSTEMD_UNIT_PATH = pathlib.Path("/etc/systemd/system/knatd.service")
+SYSTEMD_UNIT_NAME = "knatd.service"
 IGNORED_DIRECTIVES = {"logfile", "logcommon", "pidlogfile"}
 UNSUPPORTED_DIRECTIVES = {"allow", "deny"}
 
@@ -513,6 +516,84 @@ def clear_rules(backend: Iptables) -> None:
         raise
 
 
+def confirm_rule_cleanup() -> bool:
+    prompt = "Remove existing knatd forwarding rules before uninstall? [Y/n]: "
+    while True:
+        try:
+            answer = input(prompt).strip().lower()
+        except EOFError as exc:
+            raise RuntimeError(
+                "confirmation required; use --clear-rules or --keep-rules for non-interactive use"
+            ) from exc
+        if answer in {"", "y", "yes"}:
+            return True
+        if answer in {"n", "no"}:
+            return False
+        print("please answer y or n", file=sys.stderr)
+
+
+def atomic_write(path: pathlib.Path, content: bytes, mode: int) -> None:
+    temporary = path.with_name(f".{path.name}.knatd-tmp")
+    try:
+        temporary.write_bytes(content)
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def uninstall_installation(backend: Iptables, *, cleanup_rules: bool) -> None:
+    require_root()
+    systemctl = shutil.which("systemctl")
+    if systemctl is None:
+        raise RuntimeError("systemctl is required to uninstall the managed service safely")
+
+    if cleanup_rules:
+        clear_rules(backend)
+
+    Iptables.run([systemctl, "disable", SYSTEMD_UNIT_NAME], check=False)
+
+    if SYSTEMD_UNIT_PATH.exists():
+        original_unit = SYSTEMD_UNIT_PATH.read_bytes()
+        original_mode = SYSTEMD_UNIT_PATH.stat().st_mode & 0o7777
+        stop_safe_unit = b"""[Unit]
+Description=knatd uninstall placeholder
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/true
+"""
+        atomic_write(SYSTEMD_UNIT_PATH, stop_safe_unit, original_mode)
+        try:
+            Iptables.run([systemctl, "daemon-reload"])
+            Iptables.run([systemctl, "stop", SYSTEMD_UNIT_NAME])
+        except Exception:
+            atomic_write(SYSTEMD_UNIT_PATH, original_unit, original_mode)
+            Iptables.run([systemctl, "daemon-reload"], check=False)
+            raise
+        SYSTEMD_UNIT_PATH.unlink()
+    elif not cleanup_rules:
+        active = Iptables.run(
+            [systemctl, "is-active", "--quiet", SYSTEMD_UNIT_NAME], check=False
+        )
+        if active.returncode == 0:
+            raise RuntimeError(
+                "service is active but its unit file was not found; cannot preserve rules safely"
+            )
+    else:
+        Iptables.run([systemctl, "stop", SYSTEMD_UNIT_NAME], check=False)
+
+    Iptables.run([systemctl, "daemon-reload"])
+    try:
+        INSTALLED_PROGRAM_PATH.unlink()
+    except FileNotFoundError:
+        pass
+
+
 def print_render(
     backend: Iptables,
     rules: Sequence[ForwardRule],
@@ -575,8 +656,21 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="enable IPv4 forwarding at runtime if currently disabled",
     )
+    uninstall_mode = parser.add_mutually_exclusive_group()
+    uninstall_mode.add_argument(
+        "--clear-rules",
+        action="store_true",
+        help="uninstall and remove managed forwarding rules without prompting",
+    )
+    uninstall_mode.add_argument(
+        "--keep-rules",
+        action="store_true",
+        help="uninstall but keep current rules until reboot or manual removal",
+    )
     parser.add_argument("--wait", type=int, default=5, help="seconds to wait for the xtables lock")
-    parser.add_argument("command", choices=("check", "render", "apply", "status", "clear"))
+    parser.add_argument(
+        "command", choices=("check", "render", "reload", "status", "clear", "uninstall")
+    )
     return parser
 
 
@@ -587,11 +681,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     backend = Iptables(wait_seconds=args.wait)
     try:
+        if args.command != "uninstall" and (args.clear_rules or args.keep_rules):
+            raise RuntimeError("--clear-rules and --keep-rules are only valid with uninstall")
         if args.command == "status":
             return print_status(backend)
         if args.command == "clear":
             clear_rules(backend)
             print("managed rules removed")
+            return 0
+        if args.command == "uninstall":
+            require_root()
+            cleanup_rules = (
+                True
+                if args.clear_rules
+                else False
+                if args.keep_rules
+                else confirm_rule_cleanup()
+            )
+            uninstall_installation(backend, cleanup_rules=cleanup_rules)
+            if cleanup_rules:
+                print("managed forwarding rules removed")
+            else:
+                print("managed forwarding rules preserved until reboot or manual removal")
+            print(f"knatd uninstalled; configuration preserved in {DEFAULT_CONFIG_DIR}")
             return 0
 
         config_paths = discover_config_paths(args.config)
@@ -615,7 +727,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 local_output=args.local_output,
             )
             return 0
-        if args.command == "apply":
+        if args.command == "reload":
             apply_rules(
                 backend,
                 rules,
@@ -623,7 +735,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 local_output=args.local_output,
                 allow_ip_forward_change=args.enable_ip_forward,
             )
-            print(f"applied {len(rules)} forwarding rule(s)")
+            print(f"reloaded {len(rules)} forwarding rule(s)")
             return 0
         raise AssertionError(args.command)
     except (ConfigError, CommandError, RuntimeError) as exc:

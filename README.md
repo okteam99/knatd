@@ -60,10 +60,10 @@ sudo knatd check
 sudo knatd render
 ```
 
-`render` 不修改系统。确认无误后重载服务，再查看实际规则：
+`render` 不修改系统。确认无误后重新加载配置，再查看实际规则：
 
 ```bash
-sudo systemctl reload knatd
+sudo knatd reload
 sudo knatd status
 ```
 
@@ -73,7 +73,7 @@ sudo knatd status
 
 ```bash
 sudoedit /etc/knatd/default.conf
-sudo knatd check && sudo systemctl reload knatd
+sudo knatd check && sudo knatd reload
 ```
 
 ### 5. 删除配置
@@ -84,7 +84,7 @@ sudo knatd check && sudo systemctl reload knatd
 
 ```bash
 sudo rm /etc/knatd/web.conf
-sudo knatd check && sudo systemctl reload knatd
+sudo knatd check && sudo knatd reload
 ```
 
 建议保留 `/etc/knatd/default.conf`，即使其中只有注释。需要移除全部转发时，
@@ -95,15 +95,16 @@ sudo knatd check && sudo systemctl reload knatd
 ```text
 knatd check    检查全部配置
 knatd render   预览将生成的 iptables 规则，不修改系统
-knatd apply    应用全部配置
+knatd reload   重新加载并应用全部配置
 knatd status   查看 knatd 管理的规则
 knatd clear    删除 knatd 管理的规则
+knatd uninstall 卸载服务和程序
 ```
 
 `-c FILE_OR_DIR` 可以改用其他文件或目录，也可以重复传入：
 
 ```bash
-sudo knatd -c /path/a.conf -c /path/conf.d apply
+sudo knatd -c /path/a.conf -c /path/conf.d reload
 ```
 
 ## 源地址与回程路由
@@ -114,7 +115,7 @@ sudo knatd -c /path/a.conf -c /path/conf.d apply
 如果目标服务器的回程流量确定会经过转发机，可以保留客户端真实 IP：
 
 ```bash
-sudo knatd --no-masquerade apply
+sudo knatd --no-masquerade reload
 ```
 
 使用 systemd 时，需要同步修改 `knatd.service` 的 `ExecStart` 和 `ExecReload`。
@@ -146,17 +147,29 @@ KNATD_SNAT
 
 ## 卸载
 
-停止并禁用服务，清除 `knatd` 管理的 iptables 规则，然后删除程序和 systemd
-单元：
+运行内置卸载命令：
 
 ```bash
-sudo systemctl disable --now knatd.service
-sudo /usr/local/sbin/knatd clear
-sudo rm -f /usr/local/sbin/knatd /etc/systemd/system/knatd.service
-sudo systemctl daemon-reload
+sudo knatd uninstall
 ```
 
-卸载命令默认保留 `/etc/knatd` 中的配置。需要备份配置时：
+卸载前会询问是否删除当前已有的 `KNATD_*` 转发规则：
+
+```text
+Remove existing knatd forwarding rules before uninstall? [Y/n]:
+```
+
+- 回车、`y`：清理规则后卸载
+- `n`：保留当前规则并卸载；规则会持续到系统重启或手动清理，但不会再自动恢复
+
+自动化环境可以跳过询问，明确指定处理方式：
+
+```bash
+sudo knatd uninstall --clear-rules
+sudo knatd uninstall --keep-rules
+```
+
+两种方式都默认保留 `/etc/knatd` 中的配置。需要备份配置时：
 
 ```bash
 sudo mv /etc/knatd /etc/knatd.backup

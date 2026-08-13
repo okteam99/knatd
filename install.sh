@@ -65,4 +65,4 @@ systemctl daemon-reload
 systemctl enable --now knatd.service
 
 echo "knatd installed and started"
-echo "edit ${CONFIG_DIR}/*.conf, then run: systemctl reload knatd"
+echo "edit ${CONFIG_DIR}/*.conf, then run: knatd reload"

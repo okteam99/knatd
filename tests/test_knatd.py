@@ -177,5 +177,60 @@ class ApplyTests(unittest.TestCase):
         self.assertEqual("saved rules", backend.restored)
 
 
+class UninstallTests(unittest.TestCase):
+    def test_confirmation_defaults_to_clear(self):
+        with mock.patch("builtins.input", return_value=""):
+            self.assertTrue(MODULE.confirm_rule_cleanup())
+
+    def test_confirmation_can_preserve_rules(self):
+        with mock.patch("builtins.input", return_value="n"):
+            self.assertFalse(MODULE.confirm_rule_cleanup())
+
+    def test_uninstall_removes_program_and_service_but_keeps_config(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            program = root / "usr/local/sbin/knatd"
+            service = root / "etc/systemd/system/knatd.service"
+            config = root / "etc/knatd/default.conf"
+            program.parent.mkdir(parents=True)
+            service.parent.mkdir(parents=True)
+            config.parent.mkdir(parents=True)
+            program.write_text("program")
+            service.write_text("service")
+            config.write_text("# config\n")
+            with (
+                mock.patch.object(MODULE, "require_root"),
+                mock.patch.object(MODULE, "INSTALLED_PROGRAM_PATH", program),
+                mock.patch.object(MODULE, "SYSTEMD_UNIT_PATH", service),
+                mock.patch.object(MODULE.shutil, "which", return_value="/bin/systemctl"),
+                mock.patch.object(MODULE.Iptables, "run") as run,
+            ):
+                MODULE.uninstall_installation(FakeBackend(), cleanup_rules=False)
+            self.assertFalse(program.exists())
+            self.assertFalse(service.exists())
+            self.assertTrue(config.exists())
+            commands = [call.args[0] for call in run.call_args_list]
+            self.assertIn(["/bin/systemctl", "stop", "knatd.service"], commands)
+
+    def test_uninstall_clears_rules_when_selected(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            program = root / "knatd"
+            service = root / "knatd.service"
+            program.write_text("program")
+            service.write_text("service")
+            with (
+                mock.patch.object(MODULE, "require_root"),
+                mock.patch.object(MODULE, "clear_rules") as clear,
+                mock.patch.object(MODULE, "INSTALLED_PROGRAM_PATH", program),
+                mock.patch.object(MODULE, "SYSTEMD_UNIT_PATH", service),
+                mock.patch.object(MODULE.shutil, "which", return_value="/bin/systemctl"),
+                mock.patch.object(MODULE.Iptables, "run"),
+            ):
+                backend = FakeBackend()
+                MODULE.uninstall_installation(backend, cleanup_rules=True)
+            clear.assert_called_once_with(backend)
+
+
 if __name__ == "__main__":
     unittest.main()
