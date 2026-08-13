@@ -17,6 +17,12 @@ SPEC.loader.exec_module(MODULE)
 
 
 class ConfigTests(unittest.TestCase):
+    def test_reference_config_contains_project_url(self):
+        reference = pathlib.Path(__file__).parents[1] / "examples" / "knatd.conf"
+        self.assertIn(
+            "https://github.com/okteam99/knatd", reference.read_text(encoding="utf-8")
+        )
+
     def test_parses_tcp_udp_and_src(self):
         rules, warnings = MODULE.parse_config_text(
             """
