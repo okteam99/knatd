@@ -126,6 +126,30 @@ KNATD_SNAT
 - iptables、iptables-save、iptables-restore
 - systemd（一行安装方式需要）
 
+## 卸载
+
+停止并禁用服务，清除 `knatd` 管理的 iptables 规则，然后删除程序和 systemd
+单元：
+
+```bash
+sudo systemctl disable --now knatd.service
+sudo /usr/local/sbin/knatd clear
+sudo rm -f /usr/local/sbin/knatd /etc/systemd/system/knatd.service
+sudo systemctl daemon-reload
+```
+
+卸载命令默认保留 `/etc/knatd` 中的配置。需要备份配置时：
+
+```bash
+sudo mv /etc/knatd /etc/knatd.backup
+```
+
+确定不再需要配置后，可以删除：
+
+```bash
+sudo rm -r /etc/knatd
+```
+
 ## License
 
 [MIT](LICENSE)
