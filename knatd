@@ -29,6 +29,7 @@ FORWARD_CHAIN = "KNATD_FWD"
 SNAT_CHAIN = "KNATD_SNAT"
 DEFAULT_CONFIG_DIR = pathlib.Path("/etc/knatd")
 DEFAULT_CONFIG_PATTERN = "*.conf"
+ROUTE_LOCALNET_PATH = pathlib.Path("/proc/sys/net/ipv4/conf/all/route_localnet")
 INSTALLED_PROGRAM_PATH = pathlib.Path("/usr/local/sbin/knatd")
 SYSTEMD_UNIT_PATH = pathlib.Path("/etc/systemd/system/knatd.service")
 SYSTEMD_UNIT_NAME = "knatd.service"
@@ -435,6 +436,43 @@ def enable_ip_forward(allow_change: bool) -> str:
     return previous
 
 
+def read_route_localnet() -> str:
+    try:
+        return ROUTE_LOCALNET_PATH.read_text(encoding="ascii").strip()
+    except OSError as exc:
+        raise RuntimeError(f"cannot read {ROUTE_LOCALNET_PATH}: {exc}") from exc
+
+
+def write_route_localnet(value: str) -> None:
+    try:
+        ROUTE_LOCALNET_PATH.write_text(f"{value}\n", encoding="ascii")
+    except OSError as exc:
+        raise RuntimeError(f"cannot set net.ipv4.conf.all.route_localnet: {exc}") from exc
+
+
+def enable_route_localnet(allow_change: bool) -> str:
+    previous = read_route_localnet()
+    if previous == "1":
+        return previous
+    if not allow_change:
+        raise RuntimeError(
+            "net.ipv4.conf.all.route_localnet is disabled; enable it persistently "
+            "or re-run with --enable-ip-forward"
+        )
+    write_route_localnet("1")
+    return previous
+
+
+def needs_route_localnet(rules: Sequence[ForwardRule], *, local_output: bool) -> bool:
+    if not local_output:
+        return False
+    return any(
+        rule.bind_address == "0.0.0.0"
+        or ipaddress.ip_address(rule.bind_address).is_loopback
+        for rule in rules
+    )
+
+
 def setup_owned_chains(backend: Iptables, *, local_output: bool) -> None:
     backend.ensure_chain("nat", DNAT_CHAIN)
     backend.ensure_chain("nat", OUTPUT_CHAIN)
@@ -468,9 +506,12 @@ def apply_rules(
     require_programs(backend)
     snapshot = backend.snapshot()
     previous_ip_forward: str | None = None
+    previous_route_localnet: str | None = None
     try:
         if rules:
             previous_ip_forward = enable_ip_forward(allow_ip_forward_change)
+        if needs_route_localnet(rules, local_output=local_output):
+            previous_route_localnet = enable_route_localnet(allow_ip_forward_change)
         setup_owned_chains(backend, local_output=local_output)
         flush_owned_chains(backend)
         for table, args in owned_rule_commands(
@@ -482,6 +523,8 @@ def apply_rules(
             backend.restore(snapshot)
             if previous_ip_forward == "0":
                 pathlib.Path("/proc/sys/net/ipv4/ip_forward").write_text("0\n", encoding="ascii")
+            if previous_route_localnet == "0":
+                write_route_localnet("0")
         except Exception as rollback_error:
             print(f"warning: rollback also failed: {rollback_error}", file=sys.stderr)
         raise
@@ -647,14 +690,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="preserve client source addresses; the target must route replies through this host",
     )
     parser.add_argument(
-        "--local-output",
+        "--no-local-output",
         action="store_true",
-        help="also redirect connections created locally on the forwarding host",
+        help="do not redirect connections created locally on the forwarding host",
     )
+    # Retained for compatibility; reload now enables required settings automatically.
     parser.add_argument(
         "--enable-ip-forward",
         action="store_true",
-        help="enable IPv4 forwarding at runtime if currently disabled",
+        help=argparse.SUPPRESS,
     )
     uninstall_mode = parser.add_mutually_exclusive_group()
     uninstall_mode.add_argument(
@@ -724,7 +768,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 backend,
                 rules,
                 masquerade=not args.no_masquerade,
-                local_output=args.local_output,
+                local_output=not args.no_local_output,
             )
             return 0
         if args.command == "reload":
@@ -732,8 +776,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 backend,
                 rules,
                 masquerade=not args.no_masquerade,
-                local_output=args.local_output,
-                allow_ip_forward_change=args.enable_ip_forward,
+                local_output=not args.no_local_output,
+                allow_ip_forward_change=True,
             )
             print(f"reloaded {len(rules)} forwarding rule(s)")
             return 0

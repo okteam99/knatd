@@ -7,8 +7,8 @@ After=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/local/sbin/knatd --enable-ip-forward reload
-ExecReload=/usr/local/sbin/knatd --enable-ip-forward reload
+ExecStart=/usr/local/sbin/knatd reload
+ExecReload=/usr/local/sbin/knatd reload
 ExecStop=/usr/local/sbin/knatd clear
 
 [Install]

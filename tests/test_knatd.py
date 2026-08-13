@@ -78,12 +78,21 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("SNAT", flat)
         self.assertIn("10.0.0.1", flat)
 
-    def test_local_output_is_opt_in(self):
+    def test_local_output_rules_can_be_enabled_or_disabled(self):
         rules, _ = MODULE.parse_config_text("0.0.0.0 8080 10.0.0.2 80")
         disabled = MODULE.owned_rule_commands(rules, masquerade=True, local_output=False)
         enabled = MODULE.owned_rule_commands(rules, masquerade=True, local_output=True)
         self.assertFalse(any(MODULE.OUTPUT_CHAIN in args for _, args in disabled))
         self.assertTrue(any(MODULE.OUTPUT_CHAIN in args for _, args in enabled))
+
+    def test_loopback_routing_is_needed_only_for_local_loopback_listeners(self):
+        wildcard, _ = MODULE.parse_config_text("0.0.0.0 8080 10.0.0.2 80")
+        loopback, _ = MODULE.parse_config_text("127.0.0.1 8080 10.0.0.2 80")
+        specific, _ = MODULE.parse_config_text("192.0.2.10 8080 10.0.0.2 80")
+        self.assertTrue(MODULE.needs_route_localnet(wildcard, local_output=True))
+        self.assertTrue(MODULE.needs_route_localnet(loopback, local_output=True))
+        self.assertFalse(MODULE.needs_route_localnet(specific, local_output=True))
+        self.assertFalse(MODULE.needs_route_localnet(wildcard, local_output=False))
 
     def test_discovers_only_conf_files_in_sorted_order(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -164,6 +173,26 @@ class ApplyTests(unittest.TestCase):
         self.assertEqual(4, len(appended))
         self.assertIsNone(backend.restored)
 
+    def test_apply_enables_loopback_routing_for_local_wildcard_listener(self):
+        rules, _ = MODULE.parse_config_text("0.0.0.0 8080 10.0.0.2 80")
+        backend = FakeBackend()
+        with (
+            mock.patch.object(MODULE, "require_root"),
+            mock.patch.object(MODULE, "require_programs"),
+            mock.patch.object(MODULE, "enable_ip_forward", return_value="1"),
+            mock.patch.object(
+                MODULE, "enable_route_localnet", return_value="0"
+            ) as enable_route_localnet,
+        ):
+            MODULE.apply_rules(
+                backend,
+                rules,
+                masquerade=True,
+                local_output=True,
+                allow_ip_forward_change=True,
+            )
+        enable_route_localnet.assert_called_once_with(True)
+
     def test_apply_restores_snapshot_on_failure(self):
         rules, _ = MODULE.parse_config_text("0.0.0.0 8080 10.0.0.2 80")
         backend = FakeBackend(fail_on_append=True)
@@ -181,6 +210,50 @@ class ApplyTests(unittest.TestCase):
                 allow_ip_forward_change=False,
             )
         self.assertEqual("saved rules", backend.restored)
+
+    def test_apply_restores_loopback_routing_on_failure(self):
+        rules, _ = MODULE.parse_config_text("0.0.0.0 8080 10.0.0.2 80")
+        backend = FakeBackend(fail_on_append=True)
+        with (
+            mock.patch.object(MODULE, "require_root"),
+            mock.patch.object(MODULE, "require_programs"),
+            mock.patch.object(MODULE, "enable_ip_forward", return_value="1"),
+            mock.patch.object(MODULE, "enable_route_localnet", return_value="0"),
+            mock.patch.object(MODULE, "write_route_localnet") as write_route_localnet,
+            self.assertRaises(MODULE.CommandError),
+        ):
+            MODULE.apply_rules(
+                backend,
+                rules,
+                masquerade=True,
+                local_output=True,
+                allow_ip_forward_change=True,
+            )
+        self.assertEqual("saved rules", backend.restored)
+        write_route_localnet.assert_called_once_with("0")
+
+
+class ReloadCommandTests(unittest.TestCase):
+    def test_reload_includes_connections_created_on_forwarding_host_by_default(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = pathlib.Path(temp_dir) / "default.conf"
+            config.write_text("0.0.0.0 2229 100.102.46.27 2229\n")
+            with mock.patch.object(MODULE, "apply_rules") as apply:
+                result = MODULE.main(["-c", str(config), "reload"])
+        self.assertEqual(0, result)
+        self.assertTrue(apply.call_args.kwargs["local_output"])
+        self.assertTrue(apply.call_args.kwargs["allow_ip_forward_change"])
+
+    def test_reload_can_exclude_connections_created_on_forwarding_host(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = pathlib.Path(temp_dir) / "default.conf"
+            config.write_text("0.0.0.0 2229 100.102.46.27 2229\n")
+            with mock.patch.object(MODULE, "apply_rules") as apply:
+                result = MODULE.main(
+                    ["-c", str(config), "--no-local-output", "reload"]
+                )
+        self.assertEqual(0, result)
+        self.assertFalse(apply.call_args.kwargs["local_output"])
 
 
 class UninstallTests(unittest.TestCase):

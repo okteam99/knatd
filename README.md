@@ -146,6 +146,27 @@ sudo knatd --no-masquerade reload
 通过 systemd 使用此模式时，需要同步修改 `knatd.service` 的 `ExecStart` 和
 `ExecReload`。
 
+### 本机访问
+
+默认情况下，本机发起的连接也会参与转发。因此配置 `0.0.0.0 2229 ...` 后，
+可以通过 `127.0.0.1:2229` 验证：
+
+```bash
+ssh -p 2229 root@127.0.0.1
+```
+
+对通配监听地址启用本机访问时，`reload` 会同时打开运行时内核设置
+`net.ipv4.conf.all.route_localnet`，让回环连接可以在 DNAT 后离开本机。
+
+如果只希望转发从网络进入的连接，可以关闭本机转发：
+
+```bash
+sudo knatd --no-local-output reload
+```
+
+通过 systemd 使用此模式时，同样需要修改 `knatd.service` 的 `ExecStart` 和
+`ExecReload`。
+
 ### 安全与共存
 
 工具只维护以下专用链：
@@ -161,8 +182,8 @@ KNATD_SNAT
 失败则立即恢复；同时会等待 xtables 锁，降低与 Docker、Tailscale 等工具同时
 修改防火墙时发生冲突的概率。
 
-`--enable-ip-forward` 只会在运行时打开 IPv4 forwarding。若希望系统重启后
-始终保持开启，请另外通过系统的 sysctl 配置持久化。
+`knatd reload` 会按当前规则在运行时打开所需的 IPv4 路由设置；服务启动时会
+重新设置，因此不需要另行持久化 sysctl 配置。
 
 ### 系统要求
 
