@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-22.04
+    runs-on: [ubuntu-ci, linux-x64]
     steps:
       - uses: actions/checkout@v4
       - name: Check syntax
